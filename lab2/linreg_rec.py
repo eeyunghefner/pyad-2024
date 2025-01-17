@@ -2,11 +2,15 @@ import pickle
 import re
 import nltk
 import pandas as pd
+import string
 import sklearn
 
 from nltk.corpus import stopwords
+from nltk.tokenize import word_tokenize
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import SGDRegressor
+from sklearn.pipeline import Pipeline
+from sklearn.compose import ColumnTransformer
 from sklearn.metrics import mean_absolute_error
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
@@ -16,44 +20,84 @@ nltk.download("punkt")
 
 
 def books_preprocessing(df: pd.DataFrame) -> pd.DataFrame:
-    """Функция для предобработки таблицы Books.scv"""
+    last_three_columns = df.columns[-3:]
+    rows_to_drop = [209538, 220731, 221678]
 
-    pass
+    books = df.drop(columns=last_three_columns)
+    books = books.drop(index=rows_to_drop)
+
+    new_df = books.dropna()
+    new_df['Year-Of-Publication'] = pd.to_numeric(new_df['Year-Of-Publication'], errors='coerce')
+    df_filtered = new_df.loc[new_df["Year-Of-Publication"] <= 2024]
+    df_filtered.info()
+
+    return df_filtered
 
 
 def ratings_preprocessing(df: pd.DataFrame) -> pd.DataFrame:
-    """Функция для предобработки таблицы Ratings.scv
-    Целевой переменной в этой задаче будет средний рейтинг книги,
-    поэтому в предобработку (помимо прочего) нужно включить:
-    1. Замену оценки книги пользователем на среднюю оценку книги всеми пользователями.
-    2. Расчет числа оценок для каждой книги (опционально)."""
+    ratings = df[df['Book-Rating'] != 0.0]
 
-    pass
+    books_with_one_review = ratings['ISBN'].value_counts()[ratings['ISBN'].value_counts() == 1].index
+    users_with_one_review = ratings['User-ID'].value_counts()[ratings['User-ID'].value_counts() == 1].index
+
+    filtered_rating_df = ratings[~ratings['ISBN'].isin(books_with_one_review) & ~ratings['User-ID'].isin(users_with_one_review)]
+    
+    return filtered_rating_df
 
 
 def title_preprocessing(text: str) -> str:
-    """Функция для нормализации текстовых данных в стобце Book-Title:
-    - токенизация
-    - удаление стоп-слов
-    - удаление пунктуации
-    Опционально можно убрать шаги или добавить дополнительные.
-    """
+    tokens = word_tokenize(text)
+    tokens = [word for word in tokens if word not in string.punctuation]
 
-    pass
+    stop_words = set(stopwords.words("english"))
+    tokens = [word for word in tokens if word.lower() not in stop_words]
+
+    return " ".join(tokens)
 
 
 def modeling(books: pd.DataFrame, ratings: pd.DataFrame) -> None:
-    """В этой функции нужно выполнить следующие шаги:
-    1. Бинаризовать или представить в виде чисел категориальные столбцы (кроме названий)
-    2. Разбить данные на тренировочную и обучающую выборки
-    3. Векторизовать подвыборки и создать датафреймы из векторов (размер вектора названия в тестах – 1000)
-    4. Сформировать итоговые X_train, X_test, y_train, y_test
-    5. Обучить и протестировать SGDRegressor
-    6. Подобрать гиперпараметры (при необходимости)
-    7. Сохранить модель"""
+    new_book = ratings.groupby("ISBN")["Book-Rating"].mean().reset_index()
+    new_book.rename(columns={"Book-Rating": "Average-Rating"}, inplace=True)
 
-    # ...
-    linreg = SGDRegressor()
-    # ...
+    data = books.merge(new_book, on="ISBN", how="inner")
+    data.dropna(subset=["Average-Rating"], inplace=True)
+
+    X = data[["Book-Title", "Book-Author", "Publisher", "Year-Of-Publication"]]
+    Y = data["Average-Rating"]
+
+    preprocessor = ColumnTransformer(
+    transformers=[
+        ('tfidf', TfidfVectorizer(), 'Book-Title'),
+        ('num', StandardScaler(), ['Year-Of-Publication'])
+    ],
+    remainder='drop'
+    )
+
+    X_train, X_test, y_train, y_test = train_test_split(X, Y, test_size=0.2)
+
+
+    pipeline = Pipeline(steps=[
+        ('preprocessor', preprocessor),
+        ('regressor', SGDRegressor(max_iter=1000, tol=1e-3))
+    ])
+
+    pipeline.fit(X_train, y_train)
+
+    y_pred = pipeline.predict(X_test)
+
+    mae = mean_absolute_error(y_test, y_pred)
+    print(f"MAE: {mae}")
+
     with open("linreg.pkl", "wb") as file:
-        pickle.dump(linreg, file)
+        pickle.dump(pipeline, file)
+
+
+books = pd.read_csv("Books.csv")
+ratings = pd.read_csv("Ratings.csv")
+new_books = books_preprocessing(books)
+new_ratings = ratings_preprocessing(ratings)
+nltk.download('punkt_tab')
+nltk.download('stopwords')
+new_books["Book-Title"] = books["Book-Title"].apply(title_preprocessing)
+
+modeling(new_books, new_ratings)
